@@ -3,10 +3,9 @@ import time
 import logging
 from typing import Optional, List
 from datetime import datetime, timedelta
+from multiprocessing import Pool, cpu_count
 
 import pandas as pd
-
-
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
@@ -21,6 +20,7 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
 
 class CoinMarketCapScraper:
     CMC_BASE_URL: str = "https://coinmarketcap.com/historical/"
@@ -39,7 +39,8 @@ class CoinMarketCapScraper:
         """
         self.driver = self._create_driver(headless)
 
-    def _create_driver(self, headless: bool) -> webdriver.Chrome:
+    @staticmethod
+    def _create_driver(headless: bool) -> webdriver.Chrome:
         """
         Create and configure a Chrome WebDriver instance.
 
@@ -55,8 +56,14 @@ class CoinMarketCapScraper:
         """
         options = webdriver.ChromeOptions()
         if headless:
-            options.add_argument("--headless")
+            options.add_argument("--headless=new")
         options.add_argument("--lang=en-US")
+        # Suppress logging
+        options.add_argument("--log-level=3")
+        # Disable GPU acceleration
+        options.add_argument("--disable-gpu")
+        # Suppress the "DevTools listening" message
+        options.add_experimental_option('excludeSwitches', ['enable-logging'])
 
         driver = webdriver.Chrome(
             service=Service(ChromeDriverManager().install()), options=options
@@ -78,7 +85,8 @@ class CoinMarketCapScraper:
                 break
             last_height = new_height
 
-    def parse_table(self, soup: BeautifulSoup) -> Optional[pd.DataFrame]:
+    @staticmethod
+    def parse_table(soup: BeautifulSoup) -> Optional[pd.DataFrame]:
         """
         Parse the table content from the BeautifulSoup object.
 
@@ -139,8 +147,9 @@ class CoinMarketCapScraper:
             logger.info(f"Successfully scraped the snapshot date '{snap_date}'.")
             return df_snap
 
+    @staticmethod
     def generate_snapshot_dates(
-        self, start_date_str: str, end_date_str: str, delta_days: int = 7
+        start_date_str: str, end_date_str: str, delta_days: int = 7
     ) -> List[str]:
         """
         Generate a list of snapshot dates between start_date and end_date, stepping by delta_days.
@@ -169,8 +178,9 @@ class CoinMarketCapScraper:
             current_date += delta
         return dates
 
+    @staticmethod
     def save_snapshot(
-        self, df: pd.DataFrame, snap_date: str, formats: List[str] = ['parquet']
+        df: pd.DataFrame, snap_date: str, formats: List[str] = ['parquet']
     ):
         """
         Save the snapshot DataFrame in the specified formats.
@@ -202,39 +212,6 @@ class CoinMarketCapScraper:
             else:
                 logger.warning(f"Format '{fmt}' not supported. Skipping.")
 
-    def scrape(
-        self,
-        start_date: str,
-        end_date: str,
-        delta_days: int = 7,
-        save_formats: List[str] = ['parquet'],
-    ):
-        """
-        Main method to scrape data over a range of dates.
-
-        Parameters
-        ----------
-        start_date : str
-            Start date in 'YYYYMMDD' format.
-        end_date : str
-            End date in 'YYYYMMDD' format.
-        delta_days : int, optional
-            Number of days between snapshots, by default 7.
-        save_formats : List[str], optional
-            Formats to save the data ('csv', 'parquet'), by default ['parquet'].
-        """
-        snapshot_dates = self.generate_snapshot_dates(
-            start_date, end_date, delta_days
-        )
-        for snapshot_date in snapshot_dates:
-            df_snapshot = self.get_snapshot(snapshot_date)
-            if df_snapshot is not None:
-                print(f"Snapshot for date {snapshot_date}:")
-                print(df_snapshot.head())
-                self.save_snapshot(df_snapshot, snapshot_date, formats=save_formats)
-            else:
-                print(f"No data for date {snapshot_date}")
-
     def close(self):
         """
         Close the WebDriver instance.
@@ -242,16 +219,51 @@ class CoinMarketCapScraper:
         self.driver.quit()
 
 
-if __name__ == "__main__":
+def process_date(snapshot_date):
+    """
+    Process a single snapshot date.
+
+    Parameters
+    ----------
+    snapshot_date : str
+        The date to process in 'YYYYMMDD' format.
+
+    Returns
+    -------
+    tuple
+        A tuple containing the snapshot date and the status message.
+    """
     scraper = CoinMarketCapScraper(headless=True)
     try:
-        start_date = '20230101'  # Start date in 'YYYYMMDD' format
-        end_date = '20241027'    # End date in 'YYYYMMDD' format
-        scraper.scrape(
-            start_date=start_date,
-            end_date=end_date,
-            delta_days=7,
-            save_formats=['parquet']
-        )
+        df_snapshot = scraper.get_snapshot(snapshot_date)
+        if df_snapshot is not None:
+            print(f"Snapshot for date {snapshot_date}:")
+            print(df_snapshot.head())
+            scraper.save_snapshot(df_snapshot, snapshot_date, formats=['parquet'])
+            return snapshot_date, 'Success'
+        else:
+            print(f"No data for date {snapshot_date}")
+            return snapshot_date, 'No data'
+    except Exception as e:
+        logger.error(f"Error processing date {snapshot_date}: {e}")
+        return snapshot_date, f'Error: {e}'
     finally:
         scraper.close()
+
+
+if __name__ == "__main__":
+    scraper = CoinMarketCapScraper(headless=True)
+    start_date = '20230101'  # Start date in 'YYYYMMDD' format
+    end_date = '20241027'  # End date in 'YYYYMMDD' format
+    snapshot_dates = scraper.generate_snapshot_dates(start_date, end_date, delta_days=7)
+    scraper.close()
+
+    # Determine the number of processes to use
+    num_processes = min(cpu_count(), len(snapshot_dates))
+
+    with Pool(processes=num_processes) as pool:
+        results = pool.map(process_date, snapshot_dates)
+
+    # Log the results to terminal
+    for snapshot_date, status in results:
+        print(f"{snapshot_date}: {status}")
