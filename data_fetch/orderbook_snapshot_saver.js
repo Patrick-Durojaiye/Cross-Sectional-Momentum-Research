@@ -1,26 +1,26 @@
 const fs = require('fs');
 const path = require('path');
-const { streamNormalized, normalizeBookChanges, compute, computeBookSnapshots } = require('tardis-dev');
+require('dotenv').config();
+const { init, replayNormalized, normalizeBookChanges, compute, computeBookSnapshots, normalizeTrades } = require('tardis-dev');
 const { stringify } = require('csv-stringify/sync');
 
-// Path to the directory where the CSV data will be saved
-const dataDir = path.join(__dirname, '..', 'data', 'uncleaned', 'orderbook_snapshot_data');
-const logFilePath = path.join(__dirname, 'scraper.log');
+const logFilePath = path.join(__dirname, 'order_book_snapshot_saver.log');
 
-// Ensure the data directory exists
-if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-}
+init({
+    apiKey: process.env.TARDIS_API_KEY
+});
 
 // Create a writable stream for the log file
 const logStream = fs.createWriteStream(logFilePath, { flags: 'a' });
 
 class OrderBookSnapshotSaver {
-    constructor(exchange, symbol, filePath) {
+    constructor(exchange, symbol, filePath, dataDir, start_date) {
+        this.start_date = start_date;
         this.exchange = exchange;
         this.symbol = symbol;
         this.filePath = path.join(dataDir, filePath);
         this.stream = null;
+        this.to_date = '2019-11-18';
 
         // Write CSV header if the file doesn't exist
         if (!fs.existsSync(this.filePath)) {
@@ -29,29 +29,37 @@ class OrderBookSnapshotSaver {
     }
 
     initializeStream() {
-        this.stream = streamNormalized(
+        this.stream = replayNormalized(
             {
                 exchange: this.exchange,
-                symbols: [this.symbol]
+                symbols: [this.symbol],
+                from: this.start_date,
+                to: this.to_date
             },
             normalizeBookChanges
         );
-
-        return compute(
-            this.stream,
-            // 1-minute order book snapshots at 1 level depth
-            computeBookSnapshots({ depth: 1, interval: 60 * 1000 })
-        );
+        return this.stream;
     }
 
     async startSavingSnapshots() {
-        if (!this.stream) {
+        const messages = this.initializeStream();
+        console.log(this.symbol);
+        console.log('from date', this.start_date);
+        console.log('to date', this.to_date);
+        console.log('exchange', this.exchange);
+
+        if (!messages) {
             this.logMessage('Stream not initialized. Call initializeStream() before starting.');
             return;
         }
 
-        const messages = this.initializeStream();
-        for await (const message of messages) {
+        // Apply the compute function to generate book snapshots
+        const messagesWithComputedTypes = compute(
+            messages,
+            computeBookSnapshots({ depth: 1, interval: 60 * 1000 }) // 1 depth and 60-second interval
+        );
+
+        for await (const message of messagesWithComputedTypes) {
             if (message.type === 'book_snapshot') {
                 // Extract relevant data from the message
                 const data = {
@@ -74,7 +82,6 @@ class OrderBookSnapshotSaver {
                         this.logMessage('Processed and saved CSV row');
                     }
                 });
-
             }
         }
     }
@@ -85,6 +92,4 @@ class OrderBookSnapshotSaver {
     }
 }
 
-// Example usage:
-const snapshotSaver = new OrderBookSnapshotSaver('bitmex', 'XBTUSD', 'orderbook_snapshot_data.csv');
-snapshotSaver.startSavingSnapshots();
+module.exports = { OrderBookSnapshotSaver };

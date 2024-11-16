@@ -1,6 +1,9 @@
 {
   "dependencies": {
+    "csv-parser": "^3.0.0",
     "csv-stringify": "^6.5.1",
+    "dotenv": "^16.4.5",
+    "moment": "^2.30.1",
     "tardis-dev": "^13.32.1"
   }
 }
